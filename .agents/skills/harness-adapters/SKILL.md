@@ -287,9 +287,9 @@ Firstmate sets `FM_PI_HARNESS` explicitly for both worker launch identities, and
 Keep the brief as one positional argument.
 Multiple positional args become separate queued messages; `fm-spawn`'s template already does this correctly.
 
-Project trust dialog can appear on the first pi run in any not-yet-trusted directory, observed even on clean worktrees.
-Accept with Enter.
-The decision persists per path in `~/.pi/agent/trust.json`, so later spawns in the same worktree slot skip it.
+Firstmate launches Pi crewmates and secondmates with `--approve`, which trusts project-local files for that run only, so the project trust dialog should not appear on a spawned pane.
+`--approve` is per-run and never writes the shared `~/.pi/agent/trust.json` store.
+If the dialog appears anyway, for example on a pane launched outside `fm-spawn`, accept it with Enter.
 
 `fm-spawn` keeps the turn-end extension in `state/`, outside the worktree, because project-local extension files make the trust gate strictly worse and pollute the project.
 The extension must listen for pi's `turn_end` event, not `agent_end`, so the watcher wakes after each completed turn instead of only when the whole agent run exits.
