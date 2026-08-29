@@ -17,8 +17,8 @@ This skill is the single owner of the decision policy for no-mistakes ask-user f
 Finding authority is determined by the criteria below, not by `yolo`.
 Firstmate applies this judgment to every finding that routes to it, decides any finding that is unambiguous toward the accepted design, and escalates only genuinely ambiguous, expanding, or destructive findings.
 
-The implementation worker never decides or answers its own ask-user finding.
-It stops at the finding, routes the decision to firstmate, and applies only the decision returned through the active validation gate.
+The implementation worker never decides or answers its own ask-user finding, except within the narrow self-resolution carve-out below.
+Outside that carve-out, it stops at the finding, routes the decision to firstmate, and applies only the decision returned through the active validation gate.
 
 ## Worker self-resolution carve-out
 
@@ -31,7 +31,7 @@ A worker MAY respond to an ask-user finding itself, with no firstmate round trip
 5. The fix is not destructive, not irreversible, and not security-sensitive; those always route to firstmate and, above it, to the captain.
 6. It is the first finding in its causal theme in this run; a second finding in the same theme always routes to firstmate, because repeated same-theme findings are the signal that fixes are accreting around a questionable abstraction.
 
-If any condition is unmet, or the worker is unsure whether one is met, the absolute rule above stands unchanged: append `needs-decision:` with a key and stop.
+If any condition is unmet, or the worker is unsure whether one is met, the rule above stands unchanged outside this carve-out: append `needs-decision:` with a key and stop.
 Uncertainty routes to firstmate and is never resolved by self-approval.
 This carve-out changes nothing about merge authority or the destructive, irreversible, and security-sensitive boundaries.
 
