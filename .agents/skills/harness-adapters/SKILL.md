@@ -290,7 +290,7 @@ Multiple positional args become separate queued messages; `fm-spawn`'s template 
 Firstmate launches Pi crewmates and secondmates with `--approve`, which trusts project-local files for that run only, so the project trust dialog should not appear on a spawned pane.
 `--approve` is per-run and never writes the shared `~/.pi/agent/trust.json` store.
 If the dialog appears anyway, for example on a pane launched outside `fm-spawn`, accept it with Enter.
-Regression coverage is `tests/fm-spawn-dispatch-profile.test.sh`; this fact is not yet independently re-verified against a live Pi CLI, so the section header's VERIFIED date is unchanged.
+pi --help on Pi 0.84.1 documents the flag (checked 2026-08-29: "--approve, -a  Trust project-local files for this run"); end-to-end trust-dialog suppression was not observed live in this task, and regression coverage is `tests/fm-spawn-dispatch-profile.test.sh`, so the section header's VERIFIED date is unchanged.
 
 `fm-spawn` keeps the turn-end extension in `state/`, outside the worktree, because project-local extension files make the trust gate strictly worse and pollute the project.
 The extension must listen for pi's `turn_end` event, not `agent_end`, so the watcher wakes after each completed turn instead of only when the whole agent run exits.
