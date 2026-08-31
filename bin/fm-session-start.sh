@@ -755,7 +755,12 @@ fi
 stage supervision-instructions
 AFK_PRESENT=0
 # Pair the durable flag with the live-daemon predicate: a stale flag left by a
-# dead daemon must not claim away-mode coverage at session start.
+# dead daemon must not claim away-mode coverage at session start. Computed
+# once here and reused everywhere below (supervision instructions, the AFK
+# digest section, next-step guidance) so a daemon start/exit mid-session-start
+# cannot make those three disagree with each other.
+AFK_FLAG_PRESENT=0
+[ -e "$STATE/.afk" ] && AFK_FLAG_PRESENT=1
 fm_afk_supervision_covered && AFK_PRESENT=1
 X_MODE_PRESENT=0
 [ -f "$CONFIG/x-mode.env" ] && X_MODE_PRESENT=1
@@ -863,9 +868,9 @@ done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
 
 subsection "AFK"
-if fm_afk_supervision_covered; then
+if [ "$AFK_PRESENT" -eq 1 ]; then
   printf 'present - away-mode supervision is active; the daemon owns the watcher.\n'
-elif [ -e "$STATE/.afk" ]; then
+elif [ "$AFK_FLAG_PRESENT" -eq 1 ]; then
   printf 'present but the away-mode daemon is not running - away-mode supervision is NOT covered; repair supervision instead of standing down.\n'
 else
   printf 'absent\n'
