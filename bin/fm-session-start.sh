@@ -267,6 +267,14 @@ stage() {  # <stage-name>: breadcrumb for the parent's truncation banner
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# fm-afk-start.sh provides the shared away-mode coverage pairing
+# (fm_afk_supervision_covered: flag present AND daemon_lock_held_by_live_daemon);
+# it is sourceable (BASH_SOURCE guard) and its main does not run on source. It
+# sets `set -eu`, so turn errexit back off immediately to restore this script's
+# `set -u`-only flow, exactly as bin/fm-afk-launch.sh consumes it.
+# shellcheck source=bin/fm-afk-start.sh
+. "$SCRIPT_DIR/fm-afk-start.sh"
+set +e
 
 if [ -z "${FM_SESSION_START_STAGE_FILE:-}" ]; then
   SESSION_START_BUDGET=${FM_SESSION_START_TIMEOUT:-120}
@@ -746,7 +754,9 @@ fi
 # --- 4. supervision operating instructions ----------------------------------
 stage supervision-instructions
 AFK_PRESENT=0
-[ -e "$STATE/.afk" ] && AFK_PRESENT=1
+# Pair the durable flag with the live-daemon predicate: a stale flag left by a
+# dead daemon must not claim away-mode coverage at session start.
+fm_afk_supervision_covered && AFK_PRESENT=1
 X_MODE_PRESENT=0
 [ -f "$CONFIG/x-mode.env" ] && X_MODE_PRESENT=1
 
@@ -853,8 +863,10 @@ done
 [ "$ORPHAN_STATUS_FOUND" -eq 1 ] || printf '(none)\n'
 
 subsection "AFK"
-if [ -e "$STATE/.afk" ]; then
+if fm_afk_supervision_covered; then
   printf 'present - away-mode supervision is active; the daemon owns the watcher.\n'
+elif [ -e "$STATE/.afk" ]; then
+  printf 'present but the away-mode daemon is not running - away-mode supervision is NOT covered; repair supervision instead of standing down.\n'
 else
   printf 'absent\n'
 fi
