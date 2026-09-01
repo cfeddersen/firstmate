@@ -223,14 +223,24 @@ cycle_mark_predecessor_successor() {
 }
 
 clear_stale_recorded_watcher_lock() {
-  local lock_home lock_path lock_identity
+  local lock_home lock_path lock_identity work_to_surface=''
   lock_home=$(cat "$WATCH_LOCK/fm-home" 2>/dev/null || true)
   lock_path=$(cat "$WATCH_LOCK/watcher-path" 2>/dev/null || true)
   lock_identity=$(cat "$WATCH_LOCK/pid-identity" 2>/dev/null || true)
   [ "$lock_home" = "$FM_HOME" ] || return 0
   [ "$lock_path" = "$WATCH" ] || return 0
   [ -n "$lock_identity" ] || return 0
-  fm_recovery_transition "$STATE/.watcher-down" clear-stale-lock "$WATCH_LOCK" downtime
+  # clear-stale-lock REMOVES the lock rather than stealing it, so the fresh watcher
+  # that follows gets no FM_LOCK_RECOVERED_PID and relies solely on the marker.
+  # An OPEN DECISION is durable supervision work that does not live as a wake-queue
+  # row, so a preserved acked marker here would silence the next re-arm and swallow
+  # the decision - the same silent-loss the release-lock path guards against.
+  # Detect it caller-side, outside _fm_recovery_marker_publish's marker-lock
+  # critical section (scan_open_decisions forks), and signal work-to-surface so the
+  # publish re-mints instead of preserving.
+  _fm_wake_require_classify
+  [ -z "$(scan_open_decisions "$STATE" 2>/dev/null)" ] || work_to_surface=work-to-surface
+  fm_recovery_transition "$STATE/.watcher-down" clear-stale-lock "$WATCH_LOCK" downtime "$work_to_surface"
 }
 
 # A watcher is "healthy" iff the lock names a live process that is genuinely THIS

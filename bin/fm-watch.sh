@@ -1401,7 +1401,7 @@ home_summary_refresh_detached() {
 }
 
 watcher_cleanup() {
-  local cleanup_status=0 owns_lock=0 transition=release-lock
+  local cleanup_status=0 owns_lock=0 transition=release-lock work_to_surface=''
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
     owns_lock=1
     if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \
@@ -1412,8 +1412,23 @@ watcher_cleanup() {
   fm_active_check_stop || cleanup_status=1
   fm_check_output_cleanup
   fm_custom_check_snapshot_cleanup
+  # An OPEN DECISION the captain still owes an answer to is durable supervision
+  # work that does NOT live as a wake-queue row. A plain release-lock over an
+  # acked marker with an empty queue would preserve the marker and leave the next
+  # re-arm silent - swallowing the decision, the exact silent-loss this task
+  # exists to remove. Detect it here in the caller, OUTSIDE the marker-lock
+  # critical section (scan_open_decisions forks a subshell and _fm_recovery_marker_publish's
+  # section must not), and signal work-to-surface so the publish re-mints a
+  # recovery episode instead of preserving. Only when we actually publish
+  # (release-lock); release-lock-existing does not re-mint and ignores the token.
+  # scan_open_decisions is the whole-file fold and never touches the drain's
+  # incremental cursor, so this cannot itself become a silent-loss path.
+  if [ "$owns_lock" -eq 1 ] && [ "$transition" = release-lock ] \
+    && [ -n "$(scan_open_decisions "$STATE" 2>/dev/null)" ]; then
+    work_to_surface=work-to-surface
+  fi
   if [ "$owns_lock" -eq 1 ] \
-    && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" downtime; then
+    && ! fm_recovery_transition "$WATCHER_DOWNTIME_MARKER" "$transition" "$WATCH_LOCK" downtime "$work_to_surface"; then
     echo "watcher: recovery state could not be persisted; retaining stale lock evidence" >&2
     cleanup_status=1
   fi
