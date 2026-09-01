@@ -30,13 +30,42 @@ TMP_ROOT=$(fm_test_tmproot fm-watch-triage-tests)
 ack_stopped_cycle() {  # <state>
   local state=$1 err sequence generation
   err="$state/.test-cycle-drain.err"
-  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err" || return 1
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err" || { rm -f "$err"; return 1; }
   sequence=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through \([0-9][0-9]*\) --recovery-generation [A-Za-z0-9._-][A-Za-z0-9._-]*$/\1/p' "$err")
   generation=$(sed -n 's/^WAKE_ACK_REQUIRED:.*--ack-through [0-9][0-9]* --recovery-generation \([A-Za-z0-9._-][A-Za-z0-9._-]*\)$/\1/p' "$err")
   rm -f "$err"
-  [ -n "$sequence" ] && [ -n "$generation" ] || return 1
+  # This is fixture-hygiene cleanup between phases, not the subject assertion: each
+  # test asserts its own wake surfacing separately (wait_for_exit plus a grep on
+  # the delivered output) before calling this. A cycle stopped with nothing
+  # outstanding leaves no recovery episode - a drain error still fails above, but a
+  # clean drain that prints no WAKE_ACK_REQUIRED is a settled cycle and is success,
+  # not an unacknowledged wake. The old code re-minted a phantom downtime episode
+  # on every forced stop; the acked-marker preservation fix removes it, so a
+  # settled stop no longer has anything to acknowledge here. The dedicated positive
+  # assertion that a settled stop leaves no phantom lives in the recovery-loop
+  # tests and at the Phase C priming stop below via expect_settled_stopped_cycle.
+  [ -n "$sequence" ] && [ -n "$generation" ] || return 0
   FM_STATE_OVERRIDE="$state" "$DRAIN" --ack-through "$sequence" \
     --recovery-generation "$generation"
+}
+
+# A watcher force-stopped with nothing outstanding - an empty durable queue and an
+# already acknowledged recovery episode - must NOT manufacture a fresh recovery
+# episode. The drain then reports nothing to acknowledge (no WAKE_ACK_REQUIRED)
+# and the settled marker is preserved, so the next cycle starts clean with no
+# empty resurface. This is the corrected behavior from the acked-marker
+# preservation fix: the old code re-minted a phantom downtime episode on every
+# forced stop, which this fixture used to have to drain away with
+# ack_stopped_cycle.
+expect_settled_stopped_cycle() {  # <state>
+  local state=$1 err rc=0 marker
+  err="$state/.test-cycle-drain.err"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err" || rc=1
+  if [ "$rc" -eq 0 ] && grep -q '^WAKE_ACK_REQUIRED:' "$err"; then rc=1; fi
+  rm -f "$err"
+  marker=$(cat "$state/.watcher-down" 2>/dev/null || true)
+  case "$marker" in acked:*|'') ;; *) rc=1 ;; esac
+  return "$rc"
 }
 
 # Common watcher knobs: tight poll/grace, no check or heartbeat cadence unless a
@@ -2690,7 +2719,11 @@ test_busy_declared_pause_is_rechecked_not_wedge_escalated() {
   reap "$pid"
   [ -s "$state/.stale-since-$key" ] || fail "a lifted pause did not restore the busy-turn wedge timer"
   [ ! -e "$state/.paused-$key" ] || fail "a lifted pause left stale declared-pause bookkeeping behind"
-  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional lifted-pause priming stop"
+  # This priming stop had nothing outstanding (the wedge escalation has not fired
+  # yet and the queue is empty on a settled marker), so it must leave no recovery
+  # episode to consume rather than a phantom the next cycle would resurface.
+  expect_settled_stopped_cycle "$state" \
+    || fail "a lifted-pause priming stop with nothing outstanding must leave no recovery episode"
 
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
   : > "$out"

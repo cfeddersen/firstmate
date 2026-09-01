@@ -1401,17 +1401,25 @@ fm_wake_append() {
   status=0
 
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
-  _fm_recovery_marker_publish "$recovery_marker" downtime || status=$?
-  if [ "$status" -eq 0 ]; then
-    seq=$(cat "$seq_file" 2>/dev/null || echo 0)
-    case "$seq" in
-      ''|*[!0-9]*) seq=0 ;;
-    esac
-    seq=$((seq + 1))
-    printf '%s\n' "$seq" > "$seq_file" || status=$?
-  fi
+  # Enqueue the durable row BEFORE publishing the recovery marker, both under this
+  # queue lock. A downtime publish preserves an already-acknowledged episode only
+  # when no durable work is queued (see _fm_recovery_marker_publish), so the wake
+  # this call is enqueuing must already be visible in the queue when the marker is
+  # published, or a genuine new wake arriving on an acknowledged marker would be
+  # left unannounced. Ordering the append first also means the marker is never
+  # re-minted ahead of its row: any observer that sees the published episode also
+  # sees the row that justified it.
+  seq=$(cat "$seq_file" 2>/dev/null || echo 0)
+  case "$seq" in
+    ''|*[!0-9]*) seq=0 ;;
+  esac
+  seq=$((seq + 1))
+  printf '%s\n' "$seq" > "$seq_file" || status=$?
   if [ "$status" -eq 0 ]; then
     printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" >> "$FM_WAKE_QUEUE" || status=$?
+  fi
+  if [ "$status" -eq 0 ]; then
+    _fm_recovery_marker_publish "$recovery_marker" downtime || status=$?
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
