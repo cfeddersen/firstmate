@@ -220,5 +220,127 @@ test_handling_successor_does_not_go_blind() {
   pass "a resurfacing handling successor stays alive and supervises instead of going blind"
 }
 
+# Drive the real recovery-marker transitions in a subprocess that sources the
+# actual bin/fm-wake-lib.sh - the mechanism from the scout report's repro2.sh.
+# The library functions are the recovery-marker contract's public interface and
+# are the exact code watcher_cleanup (release-lock), fm-wake-drain.sh (ack), and
+# the arm startup (arm-check) call. Driving them isolates the marker contract
+# from the orthogonal stale-lock recovery path (FM_LOCK_RECOVERED_PID ->
+# WATCHER_RECOVERY_PENDING), which a real watcher killed mid-poll would leak into
+# and which is not the empty-resurface loop under diagnosis. Echoes the driver's
+# stdout.
+recovery_marker_driver() {  # <state-dir> <body>
+  local st=$1 body=$2
+  : > "$st/.wake-queue"
+  FM_STATE_OVERRIDE="$st" STATE="$st" FM_WAKE_QUEUE="$st/.wake-queue" \
+    ROOT="$ROOT" MARK_BODY="$body" bash <<'DRIVER'
+set -u
+. "$ROOT/bin/fm-wake-lib.sh"
+MARK="$STATE/.watcher-down"
+LOCK="$STATE/.watch.lock"
+eval "$MARK_BODY"
+DRIVER
+}
+
+# T3: the empty-resurface loop. After firstmate acknowledges an episode, the very
+# next clean watcher close (release-lock) must NOT re-mint a fresh downtime
+# episode over the acked marker while the durable queue is empty, so the next
+# fresh non-successor arm's arm-check does not recover. This is the Claude
+# Stop-hook shape (no FM_WATCH_HANDLING_SUCCESSOR), which the T1/T2 successor
+# guard cannot cover.
+test_acked_release_lock_does_not_resurface_empty() {
+  local st out
+  st=$(mktemp -d "$TMP_ROOT/acked-noresurface.XXXXXX")
+  # shellcheck disable=SC2016 # body is expanded inside the driver subprocess, not here
+  out=$(recovery_marker_driver "$st" '
+    printf "announced:handling:GENx\n" > "$MARK"; chmod 600 "$MARK"
+    fm_recovery_marker_ack "$MARK" GENx || { echo "ERR ack"; exit 1; }
+    fm_recovery_transition "$MARK" release-lock "$LOCK" downtime 2>/dev/null || true
+    printf "SETTLED=%s\n" "$(cat "$MARK")"
+    fm_recovery_marker_arm_check "$MARK" || { echo "ERR arm-check"; exit 1; }
+    printf "ACTION=%s\n" "$FM_RECOVERY_MARKER_ACTION"
+  ') || fail "T3 marker driver failed: $out"
+  case "$out" in
+    *SETTLED=acked:*) ;;
+    *) fail "T3 release-lock reopened a settled episode over an empty queue: $out" ;;
+  esac
+  case "$out" in
+    *ACTION=recover*) fail "T3 fresh non-successor arm resurfaced an empty settled episode: $out" ;;
+    *ACTION=none*) ;;
+    *) fail "T3 unexpected arm-check outcome: $out" ;;
+  esac
+  [ "${FM_TEST_EVIDENCE:-0}" != 1 ] || printf '%s\n' "$out"
+  pass "a settled acked episode survives a clean close and a fresh non-successor arm does not resurface an empty queue"
+}
+
+# T3b: the drain's real-work path must keep working. When durable work IS queued,
+# a downtime publish over an acked marker must still re-mint a fresh episode so
+# fm-wake-drain.sh can begin handling it - a blanket "preserve acked" would strand
+# the queued wake in a marker state begin-handling rejects.
+test_acked_with_queued_work_still_remints() {
+  local st out
+  st=$(mktemp -d "$TMP_ROOT/acked-queued-remint.XXXXXX")
+  # shellcheck disable=SC2016 # body is expanded inside the driver subprocess, not here
+  out=$(recovery_marker_driver "$st" '
+    printf "acked:handling:GEN0\n" > "$MARK"; chmod 600 "$MARK"
+    printf "111\t1\tsignal\tfoo\tbar\n" > "$FM_WAKE_QUEUE"
+    fm_recovery_marker_publish "$MARK" downtime || { echo "ERR publish"; exit 1; }
+    printf "REMINTED=%s\n" "$(cat "$MARK")"
+    fm_recovery_marker_begin_handling "$MARK" || { echo "ERR begin"; exit 1; }
+    printf "HANDLING=%s\n" "$(cat "$MARK")"
+  ') || fail "T3b marker driver failed (drain real-work path broken): $out"
+  case "$out" in
+    *REMINTED=pending:downtime:*|*REMINTED=announced:downtime:*) ;;
+    *) fail "T3b a queued wake over an acked marker was not given a fresh episode: $out" ;;
+  esac
+  case "$out" in
+    *HANDLING=*:handling:*) ;;
+    *) fail "T3b begin-handling could not adopt the re-minted episode: $out" ;;
+  esac
+  [ "${FM_TEST_EVIDENCE:-0}" != 1 ] || printf '%s\n' "$out"
+  pass "an acked marker with durable queued work still re-mints a fresh episode the drain can handle"
+}
+
+# T4: the safety counterpart, required alongside T3. A mid-handshake death leaves
+# an UNacknowledged episode (pending/announced, never acked). A clean close must
+# preserve that live episode's generation, and a fresh non-successor arm must
+# still recover (resurface) a pending one - the settled-episode fix must not
+# silence a genuine supervision gap.
+test_unacked_downtime_close_preserves_and_resurfaces() {
+  local st out
+  st=$(mktemp -d "$TMP_ROOT/unacked-resurfaces.XXXXXX")
+  # shellcheck disable=SC2016 # body is expanded inside the driver subprocess, not here
+  out=$(recovery_marker_driver "$st" '
+    # pending death: close preserves generation, fresh arm recovers.
+    printf "pending:downtime:GENp\n" > "$MARK"; chmod 600 "$MARK"
+    fm_recovery_transition "$MARK" release-lock "$LOCK" downtime 2>/dev/null || true
+    printf "PENDING_AFTER_CLOSE=%s\n" "$(cat "$MARK")"
+    fm_recovery_marker_arm_check "$MARK" || { echo "ERR arm-check"; exit 1; }
+    printf "PENDING_ACTION=%s\n" "$FM_RECOVERY_MARKER_ACTION"
+    # announced death: close preserves the announced generation (the episode
+    # stays live for the drain), never downgraded to acked.
+    printf "announced:downtime:GENa\n" > "$MARK"; chmod 600 "$MARK"
+    fm_recovery_transition "$MARK" release-lock "$LOCK" downtime 2>/dev/null || true
+    printf "ANNOUNCED_AFTER_CLOSE=%s\n" "$(cat "$MARK")"
+  ') || fail "T4 marker driver failed: $out"
+  case "$out" in
+    *PENDING_AFTER_CLOSE=pending:downtime:GENp*) ;;
+    *) fail "T4 a pending mid-handshake death was not preserved across a clean close: $out" ;;
+  esac
+  case "$out" in
+    *PENDING_ACTION=recover*) ;;
+    *) fail "T4 a genuine unacknowledged gap did not resurface for a fresh arm: $out" ;;
+  esac
+  case "$out" in
+    *ANNOUNCED_AFTER_CLOSE=announced:downtime:GENa*) ;;
+    *) fail "T4 an announced mid-handshake death was not preserved across a clean close: $out" ;;
+  esac
+  [ "${FM_TEST_EVIDENCE:-0}" != 1 ] || printf '%s\n' "$out"
+  pass "a mid-handshake death still leaves a live episode across a clean close and a pending gap still resurfaces"
+}
+
 test_handling_successor_does_not_go_blind
 test_unacknowledged_recovery_is_announced_once_per_generation
+test_acked_release_lock_does_not_resurface_empty
+test_acked_with_queued_work_still_remints
+test_unacked_downtime_close_preserves_and_resurfaces

@@ -34,6 +34,24 @@ drain_and_ack() {  # <state>
     --recovery-generation "$generation"
 }
 
+# A watcher force-stopped with nothing outstanding - an empty durable queue and an
+# already acknowledged recovery episode - must NOT manufacture a fresh recovery
+# episode. The drain then reports nothing to acknowledge (no WAKE_ACK_REQUIRED)
+# and the settled marker is preserved, so the next arm starts clean with no empty
+# resurface. This is the corrected behavior from the acked-marker preservation
+# fix: the old code re-minted a phantom downtime episode on every forced stop,
+# which these fixtures used to have to drain away with drain_and_ack.
+expect_settled_stopped_cycle() {  # <state>
+  local state=$1 err rc=0 marker
+  err="$state/.test-drain.err"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" >/dev/null 2> "$err" || rc=1
+  if [ "$rc" -eq 0 ] && grep -q '^WAKE_ACK_REQUIRED:' "$err"; then rc=1; fi
+  rm -f "$err"
+  marker=$(cat "$state/.watcher-down" 2>/dev/null || true)
+  case "$marker" in acked:*|'') ;; *) rc=1 ;; esac
+  return "$rc"
+}
+
 test_singleton_start() {
   local dir state fakebin out1 out2 pid1 pid2 live i
   dir=$(make_case singleton)
@@ -874,11 +892,12 @@ SH
     || fail "predecessor ledger record was not linked to its verified successor"
   kill -HUP "$successor_arm" 2>/dev/null || true
   wait "$successor_arm" 2>/dev/null || true
-  # The forced interruption is a watcher-down interval. Consume the prior
-  # delivered wake before beginning independent ledger cycles, just as the
-  # recovery handling turn does, so this fixture does not intentionally carry a
-  # durable wake into the next arm.
-  drain_and_ack "$state" || fail "recovery drain after forced arm interruption failed"
+  # The forced interruption is a watcher-down interval, but this successor was
+  # holding a settled (acknowledged, empty-queue) marker, so it carries no
+  # durable wake into the next arm and must not manufacture a phantom recovery
+  # episode. The next arm therefore starts clean with no empty resurface.
+  expect_settled_stopped_cycle "$state" \
+    || fail "a forced interruption with nothing outstanding must leave no recovery episode to consume"
 
   # Produce enough short cycles to cross a deliberately small cap. The cap is
   # applied by the arm layer itself and keeps only complete ledger records.
@@ -896,8 +915,8 @@ SH
     grep -qF 'watcher: started pid=' "$armout" || fail "bounded ledger cycle $iteration did not start"
     kill -HUP "$successor_arm" 2>/dev/null || true
     wait "$successor_arm" 2>/dev/null || true
-    drain_and_ack "$state" \
-      || fail "recovery drain after bounded ledger cycle $iteration failed"
+    expect_settled_stopped_cycle "$state" \
+      || fail "bounded ledger cycle $iteration with nothing outstanding must leave no recovery episode"
     iteration=$((iteration + 1))
   done
   size=$(wc -c < "$state/.watch-cycle-exits.log" | tr -d '[:space:]')
