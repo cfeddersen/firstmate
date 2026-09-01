@@ -529,14 +529,19 @@ _fm_recovery_marker_write_locked() {
 # new down stretch mints a new generation.
 # docs/watcher-continuity.md owns the recovery contract and sequence-safety rationale.
 _fm_recovery_marker_publish() {
-  # wake_pending: the caller passes the literal token "wake-pending" when it is
-  # enqueuing a durable wake in this same critical section, so an acknowledged
-  # marker is re-minted (the new wake needs its own recovery episode) rather than
-  # preserved. Only fm_wake_append sets it. Any other value - including the
-  # default empty from every routine close - keeps the settled-marker
-  # preservation. The exact-token test means a stray or defaulted argument fails
-  # safe toward preservation instead of accidentally re-minting.
-  local marker=$1 kind=${2:-downtime} wake_pending=${3:-} lock saved_token generation='' status=pending preserve_acked=0
+  # work_to_surface: the caller passes the literal token "work-to-surface" when a
+  # re-arm must surface durable supervision work it knows about, so an
+  # acknowledged marker is re-minted (that work needs its own recovery episode)
+  # rather than preserved. This means "there is durable work a re-arm must
+  # surface", NOT "the wake queue file is non-empty" - the callers know things the
+  # queue does not, so they must say so rather than have this function infer it.
+  # Two callers set it: fm_wake_append (it is enqueuing a durable wake row) and
+  # watcher_cleanup's release-lock (when an OPEN DECISION is still held - durable
+  # work that does not live as a queue row). Any other value - including the
+  # default empty from a routine close with nothing outstanding - keeps the
+  # settled-marker preservation. The exact-token test means a stray or defaulted
+  # argument fails safe toward preservation instead of accidentally re-minting.
+  local marker=$1 kind=${2:-downtime} work_to_surface=${3:-} lock saved_token generation='' status=pending preserve_acked=0
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
   lock="${marker}.lock"
   fm_lock_acquire_wait "$lock" || return 1
@@ -561,19 +566,22 @@ _fm_recovery_marker_publish() {
           ;;
         acked:handling:*|acked:downtime:*)
           # An already-acknowledged episode was fully handled. Re-minting a fresh
-          # downtime generation over it on a routine close (release-lock, a
-          # stale-lock steal) reopens a settled episode, so the next armed watcher
-          # resurfaces "check: rearm-resurface" with nothing to handle - an
-          # unbounded empty-wake loop under any per-turn re-arm model that does not
-          # carry the handling-successor flag (e.g. the Claude Stop-hook auto-arm).
-          # A clean close after acknowledgement is not a new supervision gap: keep
-          # the acked marker as-is. Re-minting stays justified only when the caller
-          # is enqueuing a wake right now (wake_pending, set by fm_wake_append,
-          # which publishes before it appends the row) or durable work is already
+          # downtime generation over it on a routine close reopens a settled
+          # episode, so the next armed watcher resurfaces "check: rearm-resurface"
+          # with nothing to handle - an unbounded empty-wake loop under any
+          # per-turn re-arm model that does not carry the handling-successor flag
+          # (e.g. the Claude Stop-hook auto-arm). A clean close after
+          # acknowledgement with nothing outstanding is not a new supervision gap:
+          # keep the acked marker as-is. Re-minting stays justified only when there
+          # is durable work a re-arm must surface: the caller says so with
+          # work_to_surface (fm_wake_append enqueuing a wake, or watcher_cleanup
+          # when an open decision is still held), or a durable wake is already
           # queued (the drain/arm-check adoption of an acked marker on a non-empty
-          # queue). A mid-handshake death leaves pending/announced, not acked, so
-          # genuine downtime recovery above is untouched.
-          [ "$wake_pending" = wake-pending ] || [ -s "$FM_WAKE_QUEUE" ] || preserve_acked=1
+          # queue). An open decision is durable work that is NOT a queue row, so
+          # the -s test alone cannot see it - that is why the caller must signal.
+          # A mid-handshake death leaves pending/announced, not acked, so genuine
+          # downtime recovery above is untouched.
+          [ "$work_to_surface" = work-to-surface ] || [ -s "$FM_WAKE_QUEUE" ] || preserve_acked=1
           ;;
       esac
     fi
@@ -759,7 +767,11 @@ _fm_recovery_marker_reopen_announced() {
 }
 
 fm_recovery_transition() {
-  local marker=$1 action=$2 target=${3:-} value=${4:-}
+  # extra: an opaque token forwarded to _fm_recovery_marker_publish. release-lock
+  # passes it so a caller (watcher_cleanup) can signal work-to-surface - durable
+  # work a re-arm must surface, such as a still-open decision - without this layer
+  # knowing what it means.
+  local marker=$1 action=$2 target=${3:-} value=${4:-} extra=${5:-}
   case "$action" in
     publish)
       _fm_recovery_marker_publish "$marker" "${target:-downtime}"
@@ -775,7 +787,7 @@ fm_recovery_transition() {
       ;;
     release-lock)
       [ -n "$target" ] || return 1
-      _fm_recovery_marker_publish "$marker" "${value:-downtime}" || return 1
+      _fm_recovery_marker_publish "$marker" "${value:-downtime}" "$extra" || return 1
       fm_lock_release "$target"
       ;;
     release-lock-existing)
@@ -791,7 +803,7 @@ fm_recovery_transition() {
       ;;
     clear-stale-lock)
       [ -n "$target" ] || return 1
-      _fm_recovery_marker_publish "$marker" "${value:-downtime}" || return 1
+      _fm_recovery_marker_publish "$marker" "${value:-downtime}" "$extra" || return 1
       fm_lock_remove_path "$target"
       ;;
     *) return 2 ;;
@@ -1412,11 +1424,12 @@ fm_wake_append() {
   # queue lock, so a failed marker publication aborts the append and no wake row
   # is ever durable without its recovery evidence. That append-wake atomicity
   # contract is pinned by tests/fm-wake-queue.test.sh and must not change.
-  # This path is enqueuing a real wake, so it passes wake-pending to re-mint a
-  # fresh episode over an acknowledged marker instead of preserving it. The caller
-  # states that intent explicitly rather than having the publish infer it from a
-  # queue that is still mid-update - the inference was the original defect.
-  _fm_recovery_marker_publish "$recovery_marker" downtime wake-pending || status=$?
+  # This path is enqueuing a real wake - durable work a re-arm must surface - so it
+  # passes work-to-surface to re-mint a fresh episode over an acknowledged marker
+  # instead of preserving it. The caller states that intent explicitly rather than
+  # having the publish infer it from a queue that is still mid-update - the
+  # inference was the original defect.
+  _fm_recovery_marker_publish "$recovery_marker" downtime work-to-surface || status=$?
   if [ "$status" -eq 0 ]; then
     seq=$(cat "$seq_file" 2>/dev/null || echo 0)
     case "$seq" in

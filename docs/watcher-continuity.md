@@ -57,9 +57,11 @@ A generation mismatch therefore does not block consumption of rows through that 
 The acknowledgement retires the marker only when no rows remain after sequence-bound consumption.
 A concurrently appended wake has a higher sequence, remains queued, and keeps the episode pending for presentation.
 Consequently, an empty-queue downtime publication during handling can be retired by the outstanding acknowledgement without a dedicated recovery turn.
-An acknowledged episode is preserved by a downtime publication that carries no queued work, because a clean close after acknowledgement is not a new supervision gap.
+An acknowledged episode is preserved by a downtime publication only when there is no durable work a re-arm must surface, because a clean close after acknowledgement with nothing outstanding is not a new supervision gap.
 Reopening a settled generation there would strand the next non-successor arm in an empty `check: rearm-resurface`, an unbounded loop under any per-turn re-arm model that does not carry the handling-successor flag such as the Claude Stop-hook auto-arm.
-A fresh episode opens over an acknowledged one only when the caller is enqueuing a wake in the same critical section - `fm_wake_append`, which publishes the marker before it appends the row and states that intent with an explicit flag rather than having the publish infer it from a queue still mid-update - or when a durable wake is already queued, which is exactly what lets that queued work resurface.
+"Durable work a re-arm must surface" is what the caller signals with the explicit `work-to-surface` token, not "the wake queue file is non-empty": a caller knows things the queue does not, so it says so rather than having the publish infer it from a queue that is still mid-update.
+`fm_wake_append` passes it because it is enqueuing a wake row, and `watcher_cleanup`'s release-lock passes it when an open decision is still held - durable supervision work that never lives as a queue row and that a queue-emptiness test alone cannot see, so a preserved marker there would silently swallow the decision.
+A fresh episode also opens whenever a durable wake is already queued, which is what lets that queued work resurface; a mid-handshake death leaves pending or announced, so genuine downtime recovery is untouched.
 
 ## Per-actor acknowledgement
 

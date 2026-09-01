@@ -613,6 +613,54 @@ test_restart_preserves_recovery_across_reused_pid_lock() {
   pass "watch-arm: restart publishes recovery before clearing a reused-pid watcher lock"
 }
 
+# Regression for the clear-stale-lock silent-decision-loss path. Unlike the
+# stale-lock steal (which sets FM_LOCK_RECOVERED_PID and resurfaces regardless of
+# the marker), clear-stale-lock REMOVES the lock, so the fresh watcher gets no
+# FM_LOCK_RECOVERED_PID and relies solely on the recovery marker. With a settled
+# acked marker and an empty queue, a still-open decision is durable supervision
+# work that is NOT a wake-queue row; preserving the marker there silences the
+# re-arm and swallows the decision. This reproduces that swallow: it fails without
+# the clear-stale-lock fix (marker preserved, no resurface) and passes with it
+# (clear_stale_recorded_watcher_lock signals work-to-surface, so the publish
+# re-mints and the re-arm resurfaces).
+test_restart_reused_pid_lock_surfaces_open_decision() {
+  local dir home state fakebin armout owner unrelated
+  dir=$(make_case restart-reused-pid-open-decision)
+  home="$dir/home"
+  state="$dir/state"
+  fakebin="$dir/fakebin"
+  armout="$dir/arm.out"
+  owner="$state/.watch.lock.owner.fixture"
+  mkdir -p "$home/data" "$owner"
+
+  # A settled, acknowledged episode with an empty queue: nothing queued to recover.
+  printf 'acked:handling:settled.1.aaa\n' > "$state/.watcher-down"
+  chmod 600 "$state/.watcher-down"
+  : > "$state/.wake-queue"
+  # But an OPEN DECISION the captain still owes, living only as a status line.
+  printf 'working: held for sign-off\nneeds-decision [key=signoff]: captain must choose\n' \
+    > "$state/taskA.status"
+
+  # A reused-pid lock: alive but foreign, so --restart clears it (clear-stale-lock).
+  sleep 300 &
+  unrelated=$!
+  printf '%s\n' "$unrelated" > "$owner/pid"
+  printf '%s\n' "$home" > "$owner/fm-home"
+  printf '%s\n' "$WATCH" > "$owner/watcher-path"
+  printf '%s\n' 'reused-pid-does-not-match' > "$owner/pid-identity"
+  ln -s "$owner" "$state/.watch.lock"
+
+  start_rearm_arm "$home" "$state" "$fakebin" "$armout"
+  wait_for_exit "$ARM_PID" 80 \
+    || { kill "$unrelated" 2>/dev/null || true; fail "reused-pid restart with an open decision did not surface it: $(cat "$armout")"; }
+  grep -F 'check: rearm-resurface' "$armout" >/dev/null \
+    || { kill "$unrelated" 2>/dev/null || true; fail "clear-stale-lock preserved a settled marker and swallowed the open decision: $(cat "$armout")"; }
+  is_live_non_zombie "$unrelated" || fail "restart signaled the unrelated reused-pid process"
+  kill "$unrelated" 2>/dev/null || true
+  wait "$unrelated" 2>/dev/null || true
+  pass "watch-arm: clear-stale-lock re-mints for a still-open decision instead of swallowing it"
+}
+
 test_markerless_legacy_queue_is_recovered_on_arm() {
   local dir home state fakebin row
   dir=$(make_case markerless-legacy-arm)
@@ -815,6 +863,7 @@ test_interrupted_handling_is_redrained_on_rearm
 test_malformed_marker_is_quarantined_once
 test_recovery_consumption_serializes_queue_publication
 test_restart_preserves_recovery_across_reused_pid_lock
+test_restart_reused_pid_lock_surfaces_open_decision
 test_markerless_legacy_queue_is_recovered_on_arm
 test_handling_window_close_keeps_the_acknowledgement_valid
 test_moved_generation_acknowledgement_is_self_healing
