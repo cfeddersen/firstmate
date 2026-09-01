@@ -369,7 +369,7 @@ STUB
   done
 
   payload="$TMP_ROOT/promote-dod/payload-promote-dod-no-mistakes"
-  assert_grep "ask-user findings are never yours to answer: escalate to firstmate" "$payload" \
+  assert_grep "ask-user findings: escalate to firstmate (rule 6) and stop, with one narrow self-resolution exception" "$payload" \
     "promoted no-mistakes worker did not receive the ask-user escalation rule"
   assert_grep "write only the ask-user findings, verbatim and unparaphrased (id, severity, file, line, description, authority)" "$payload" \
     "promoted no-mistakes worker did not receive the ask-user-only snapshot contract"
