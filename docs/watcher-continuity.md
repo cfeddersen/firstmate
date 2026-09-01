@@ -59,7 +59,7 @@ A concurrently appended wake has a higher sequence, remains queued, and keeps th
 Consequently, an empty-queue downtime publication during handling can be retired by the outstanding acknowledgement without a dedicated recovery turn.
 An acknowledged episode is preserved by a downtime publication that carries no queued work, because a clean close after acknowledgement is not a new supervision gap.
 Reopening a settled generation there would strand the next non-successor arm in an empty `check: rearm-resurface`, an unbounded loop under any per-turn re-arm model that does not carry the handling-successor flag such as the Claude Stop-hook auto-arm.
-Only a downtime publication with durable work still queued opens a fresh episode over an acknowledged one, which is exactly what lets that queued work resurface.
+A fresh episode opens over an acknowledged one only when the caller is enqueuing a wake in the same critical section - `fm_wake_append`, which publishes the marker before it appends the row and states that intent with an explicit flag rather than having the publish infer it from a queue still mid-update - or when a durable wake is already queued, which is exactly what lets that queued work resurface.
 
 ## Per-actor acknowledgement
 

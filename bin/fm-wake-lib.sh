@@ -529,7 +529,14 @@ _fm_recovery_marker_write_locked() {
 # new down stretch mints a new generation.
 # docs/watcher-continuity.md owns the recovery contract and sequence-safety rationale.
 _fm_recovery_marker_publish() {
-  local marker=$1 kind=${2:-downtime} lock saved_token generation='' status=pending preserve_acked=0
+  # wake_pending: the caller passes the literal token "wake-pending" when it is
+  # enqueuing a durable wake in this same critical section, so an acknowledged
+  # marker is re-minted (the new wake needs its own recovery episode) rather than
+  # preserved. Only fm_wake_append sets it. Any other value - including the
+  # default empty from every routine close - keeps the settled-marker
+  # preservation. The exact-token test means a stray or defaulted argument fails
+  # safe toward preservation instead of accidentally re-minting.
+  local marker=$1 kind=${2:-downtime} wake_pending=${3:-} lock saved_token generation='' status=pending preserve_acked=0
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
   lock="${marker}.lock"
   fm_lock_acquire_wait "$lock" || return 1
@@ -560,13 +567,13 @@ _fm_recovery_marker_publish() {
           # unbounded empty-wake loop under any per-turn re-arm model that does not
           # carry the handling-successor flag (e.g. the Claude Stop-hook auto-arm).
           # A clean close after acknowledgement is not a new supervision gap: keep
-          # the acked marker as-is. Re-minting stays justified only when durable
-          # work is actually queued; the callers that queue a wake
-          # (fm_wake_append, and the drain/arm-check adoption of an acked marker
-          # with a non-empty queue) re-mint through this same non-empty path.
-          # A mid-handshake death leaves pending/announced, not acked, so genuine
-          # downtime recovery above is untouched.
-          [ -s "$FM_WAKE_QUEUE" ] || preserve_acked=1
+          # the acked marker as-is. Re-minting stays justified only when the caller
+          # is enqueuing a wake right now (wake_pending, set by fm_wake_append,
+          # which publishes before it appends the row) or durable work is already
+          # queued (the drain/arm-check adoption of an acked marker on a non-empty
+          # queue). A mid-handshake death leaves pending/announced, not acked, so
+          # genuine downtime recovery above is untouched.
+          [ "$wake_pending" = wake-pending ] || [ -s "$FM_WAKE_QUEUE" ] || preserve_acked=1
           ;;
       esac
     fi
@@ -1401,25 +1408,25 @@ fm_wake_append() {
   status=0
 
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
-  # Enqueue the durable row BEFORE publishing the recovery marker, both under this
-  # queue lock. A downtime publish preserves an already-acknowledged episode only
-  # when no durable work is queued (see _fm_recovery_marker_publish), so the wake
-  # this call is enqueuing must already be visible in the queue when the marker is
-  # published, or a genuine new wake arriving on an acknowledged marker would be
-  # left unannounced. Ordering the append first also means the marker is never
-  # re-minted ahead of its row: any observer that sees the published episode also
-  # sees the row that justified it.
-  seq=$(cat "$seq_file" 2>/dev/null || echo 0)
-  case "$seq" in
-    ''|*[!0-9]*) seq=0 ;;
-  esac
-  seq=$((seq + 1))
-  printf '%s\n' "$seq" > "$seq_file" || status=$?
+  # Publish the recovery marker BEFORE appending the durable row, both under this
+  # queue lock, so a failed marker publication aborts the append and no wake row
+  # is ever durable without its recovery evidence. That append-wake atomicity
+  # contract is pinned by tests/fm-wake-queue.test.sh and must not change.
+  # This path is enqueuing a real wake, so it passes wake-pending to re-mint a
+  # fresh episode over an acknowledged marker instead of preserving it. The caller
+  # states that intent explicitly rather than having the publish infer it from a
+  # queue that is still mid-update - the inference was the original defect.
+  _fm_recovery_marker_publish "$recovery_marker" downtime wake-pending || status=$?
   if [ "$status" -eq 0 ]; then
-    printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" >> "$FM_WAKE_QUEUE" || status=$?
+    seq=$(cat "$seq_file" 2>/dev/null || echo 0)
+    case "$seq" in
+      ''|*[!0-9]*) seq=0 ;;
+    esac
+    seq=$((seq + 1))
+    printf '%s\n' "$seq" > "$seq_file" || status=$?
   fi
   if [ "$status" -eq 0 ]; then
-    _fm_recovery_marker_publish "$recovery_marker" downtime || status=$?
+    printf '%s\t%s\t%s\t%s\t%s\n' "$epoch" "$seq" "$kind" "$clean_key" "$clean_payload" >> "$FM_WAKE_QUEUE" || status=$?
   fi
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
   return "$status"
