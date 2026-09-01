@@ -57,7 +57,9 @@ A generation mismatch therefore does not block consumption of rows through that 
 The acknowledgement retires the marker only when no rows remain after sequence-bound consumption.
 A concurrently appended wake has a higher sequence, remains queued, and keeps the episode pending for presentation.
 Consequently, an empty-queue downtime publication during handling can be retired by the outstanding acknowledgement without a dedicated recovery turn.
-An acknowledged episode does not freeze the generation, because the next downtime after it opens an episode of its own.
+An acknowledged episode is preserved by a downtime publication that carries no queued work, because a clean close after acknowledgement is not a new supervision gap.
+Reopening a settled generation there would strand the next non-successor arm in an empty `check: rearm-resurface`, an unbounded loop under any per-turn re-arm model that does not carry the handling-successor flag such as the Claude Stop-hook auto-arm.
+Only a downtime publication with durable work still queued opens a fresh episode over an acknowledged one, which is exactly what lets that queued work resurface.
 
 ## Per-actor acknowledgement
 
@@ -102,6 +104,7 @@ Only the watcher process touches `state/.last-watcher-beat`; no helper process c
 The same suite covers ordinary same-process session replacement for `/new`, `/resume`, and `/fork`, same-instance shutdown-plus-start, stale prior-generation callbacks, repeated transitions with exactly one live cycle, disappearance of the shutting-down refusal after a valid replacement activates, and terminal quit still refusing late rearm.
 `tests/fm-watch-arm.test.sh` covers durable queue replay, real remote parent-replies ingestion into the authoritative status log, decision-only OPEN DECISIONS recovery, interrupted handling replay, generation-bound acknowledgement, a persistent live successor after recovery, a watcher close inside the handling window that must leave the printed acknowledgement valid, and the self-healing moved-generation acknowledgement that consumes its handled rows and names its remedy.
 `tests/fm-watch-recovery-loop.test.sh` covers the once-per-generation announcement bound with the real Pi extension against a refused handling handshake, and a handling successor that must surface a real crew event instead of going blind.
+It also covers the settled-episode preservation that keeps a clean non-successor close from reopening an acknowledged generation into an empty resurface, the durable-work path that still re-mints an acknowledged marker so the drain can handle the queued wake, and the mirror safety property that a mid-handshake pending or announced death still resurfaces.
 `tests/fm-watcher-lock.test.sh` covers verified-successor attach, recovery publication before stale-lock removal, the typed self-eviction failure, bounded and successor-linked lifecycle rows, and a SIGSTOP counterfactual that distinguishes a live PID from a stale beacon before classifying termination.
 `tests/fm-subagent-pretool-check.test.sh` proves Claude retains only the non-status Bash seatbelts.
 `tests/fm-claude-stop-autoarm.test.sh` covers the auto-arm's scope, stale and live session owners, unchanged AFK and need boundaries, single-flight, bounded failure retries, benign live-watcher cycle ends, one-notice failure episodes, and exit-2 translation.

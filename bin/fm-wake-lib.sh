@@ -529,7 +529,7 @@ _fm_recovery_marker_write_locked() {
 # new down stretch mints a new generation.
 # docs/watcher-continuity.md owns the recovery contract and sequence-safety rationale.
 _fm_recovery_marker_publish() {
-  local marker=$1 kind=${2:-downtime} lock saved_token generation='' status=pending
+  local marker=$1 kind=${2:-downtime} lock saved_token generation='' status=pending preserve_acked=0
   case "$kind" in handling|downtime) ;; *) return 1 ;; esac
   lock="${marker}.lock"
   fm_lock_acquire_wait "$lock" || return 1
@@ -552,9 +552,29 @@ _fm_recovery_marker_publish() {
           generation=${FM_RECOVERY_MARKER_TOKEN##*:}
           status=announced
           ;;
+        acked:handling:*|acked:downtime:*)
+          # An already-acknowledged episode was fully handled. Re-minting a fresh
+          # downtime generation over it on a routine close (release-lock, a
+          # stale-lock steal) reopens a settled episode, so the next armed watcher
+          # resurfaces "check: rearm-resurface" with nothing to handle - an
+          # unbounded empty-wake loop under any per-turn re-arm model that does not
+          # carry the handling-successor flag (e.g. the Claude Stop-hook auto-arm).
+          # A clean close after acknowledgement is not a new supervision gap: keep
+          # the acked marker as-is. Re-minting stays justified only when durable
+          # work is actually queued; the callers that queue a wake
+          # (fm_wake_append, and the drain/arm-check adoption of an acked marker
+          # with a non-empty queue) re-mint through this same non-empty path.
+          # A mid-handshake death leaves pending/announced, not acked, so genuine
+          # downtime recovery above is untouched.
+          [ -s "$FM_WAKE_QUEUE" ] || preserve_acked=1
+          ;;
       esac
     fi
     FM_RECOVERY_MARKER_TOKEN=$saved_token
+  fi
+  if [ "$preserve_acked" -eq 1 ]; then
+    fm_lock_release "$lock"
+    return 0
   fi
   if ! _fm_recovery_marker_write_locked "$marker" "$kind" "$generation" "$status"; then
     fm_lock_release "$lock"
