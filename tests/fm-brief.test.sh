@@ -210,6 +210,8 @@ test_ship_modes_generate_clean_briefs() {
     grep -qx "Delivery contract: mode=$mode" "$brief" \
       || fail "$id: brief did not record its machine-readable delivery contract line"
     assert_grep "{TASK}" "$brief" "$id: brief missing the {TASK} placeholder"
+    assert_grep "{OUT_OF_SCOPE}" "$brief" "$id: brief missing the {OUT_OF_SCOPE} placeholder"
+    assert_grep "# Out of scope" "$brief" "$id: brief missing the Out of scope section"
     assert_grep "mid-task \`working:\` line (including setup complete) is nonterminal" "$brief" \
       "$id: brief missing nonterminal working:/setup-complete gate protection"
     assert_no_grep "EOF" "$brief" "$id: brief leaked a heredoc EOF marker (unterminated heredoc)"
@@ -392,6 +394,8 @@ test_herdr_lab_contract_is_explicit_and_complete() {
   assert_present "$brief" "Herdr lab brief was not scaffolded"
   assert_grep "# Herdr isolation - HARD SAFETY CONTRACT" "$brief" \
     "Herdr lab brief missing its hard safety contract"
+  assert_grep "# Out of scope" "$brief" \
+    "Herdr lab brief missing the Out of scope section"
   assert_grep "HERDR_LAB_HELPER='$ROOT/bin/fm-herdr-lab.sh'" "$brief" \
     "Herdr lab brief must bind the absolute Firstmate helper path"
   assert_grep "HERDR_LAB_SESSION=\$(\"\$HERDR_LAB_HELPER\" name $id)" "$brief" \
@@ -675,6 +679,8 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
   brief="$home/data/herdr-scout/brief.md"
   assert_grep "# Herdr isolation - HARD SAFETY CONTRACT" "$brief" \
     "scout --herdr-lab brief missing the contract"
+  assert_grep "# Out of scope" "$brief" \
+    "scout --herdr-lab brief missing the Out of scope section"
 
   FM_HOME="$home" FM_SECONDMATE_CHARTER=ops "$ROOT/bin/fm-brief.sh" herdr-secondmate --secondmate firstmate --herdr-lab >/dev/null 2>&1 || status=$?
   expect_code 1 "$status" "secondmate --herdr-lab must be rejected"
@@ -762,6 +768,129 @@ test_scout_and_secondmate_scaffold() {
   pass "fm-brief: scout and secondmate code paths still scaffold well-formed briefs"
 }
 
+# Change: the refusal boundary. Ship and scout briefs carry an "# Out of scope"
+# section immediately after "# Task", with one {OUT_OF_SCOPE} fill site (the
+# documented fill must not collide with anything else) and the standing
+# refused-rather-than-negotiated guidance. The scaffolded confirmation must
+# name every placeholder the caller still has to fill.
+test_out_of_scope_section_renders_for_ship_and_scout() {
+  local home kind id brief out
+  home="$TMP_ROOT/out-of-scope-home"
+  mkdir -p "$home/data"
+  for kind in ship scout; do
+    id="brief-out-of-scope-$kind"
+    if [ "$kind" = ship ]; then
+      out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes)
+    else
+      out=$(FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout)
+    fi
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    assert_grep "# Out of scope" "$brief" "$kind brief missing the Out of scope section"
+    assert_grep "Anything below is refused rather than negotiated" "$brief" \
+      "$kind brief missing the refused-rather-than-negotiated standing guidance"
+    assert_grep "a reason to append a status line, not a reason to widen this task" "$brief" \
+      "$kind brief missing the report-dont-widen standing guidance"
+    [ "$(grep -c -F '{OUT_OF_SCOPE}' "$brief")" = 1 ] \
+      || fail "$kind brief must carry exactly one {OUT_OF_SCOPE} fill site"
+    awk '
+      /^# Task$/ { task = NR }
+      /^# Out of scope$/ { ok = (task && NR == task + 3); exit }
+      END { exit ok ? 0 : 1 }
+    ' "$brief" || fail "$kind brief: # Out of scope must sit immediately after the Task section"
+    case "$kind" in
+      ship)
+        assert_contains "$out" "(ship, mode=no-mistakes; replace {TASK}, {OUT_OF_SCOPE})" \
+          "ship scaffolded line must name every placeholder the caller still has to fill" ;;
+      scout)
+        assert_contains "$out" "(scout; replace {TASK}, {OUT_OF_SCOPE})" \
+          "scout scaffolded line must name every placeholder the caller still has to fill" ;;
+    esac
+  done
+  pass "fm-brief.sh: ship and scout briefs refuse out-of-scope work after the Task section"
+}
+
+# The secondmate charter keeps a single refusal contract: its idle-by-default
+# and never-self-start rules are already that boundary in substance, so a
+# second {OUT_OF_SCOPE} copy would duplicate an owned contract (one-owner rule)
+# and its confirmation stays {TASK}-only.
+test_secondmate_charter_keeps_single_refusal_contract() {
+  local home brief out
+  home="$TMP_ROOT/refusal-contract-home"
+  mkdir -p "$home/data"
+  out=$(FM_HOME="$home" \
+    "$ROOT/bin/fm-brief.sh" refusal-mate --secondmate --no-projects)
+  brief="$home/data/refusal-mate/brief.md"
+  assert_present "$brief" "charter was not scaffolded"
+  assert_grep 'Never start a survey, audit, or "find improvements" sweep on your own initiative' "$brief" \
+    "secondmate charter lost its in-substance refusal boundary"
+  assert_no_grep "# Out of scope" "$brief" \
+    "secondmate charter must not duplicate the refusal contract it already owns"
+  assert_no_grep "{OUT_OF_SCOPE}" "$brief" \
+    "secondmate charter gained an unowned placeholder"
+  assert_contains "$out" "(secondmate charter; replace {TASK})" \
+    "secondmate confirmation must stay {TASK}-only while the charter adds no placeholder"
+  pass "fm-brief.sh: the secondmate charter keeps its single refusal boundary"
+}
+
+# Change: the blocked line must be actionable. Every scaffold that teaches the
+# blocked shape must carry the three mandatory parts on ONE status line; the
+# paused-versus-blocked distinction itself is unchanged.
+test_blocked_line_carries_three_mandatory_parts_on_one_line() {
+  local home kind id brief
+  home="$TMP_ROOT/blocked-shape-home"
+  mkdir -p "$home/data"
+  for kind in ship scout secondmate; do
+    id="brief-blocked-shape-$kind"
+    case "$kind" in
+      ship)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode direct-PR >/dev/null 2>&1 ;;
+      scout)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1 ;;
+      secondmate)
+        FM_HOME="$home" FM_SECONDMATE_CHARTER='Sample domain.' \
+          "$ROOT/bin/fm-brief.sh" "$id" --secondmate --no-projects >/dev/null 2>&1 ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    # The fixed-string match also proves the whole shape stays on one line.
+    assert_grep 'blocked: {what is missing}; attempted: {what was already tried}; next: {smallest concrete action that would clear it}' "$brief" \
+      "$kind brief lost the three-part blocked-line shape"
+    assert_no_grep 'blocked: {why}' "$brief" \
+      "$kind brief still teaches the bare blocked shape"
+    # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+    assert_grep 'distinct from `blocked:`' "$brief" \
+      "$kind brief lost the paused-versus-blocked distinction"
+  done
+  assert_grep "All three parts are mandatory and stay on that one line" \
+    "$home/data/brief-blocked-shape-ship/brief.md" \
+    "ship brief missing the mandatory-parts-on-one-line note"
+  assert_grep "All three parts are mandatory and stay on that one line" \
+    "$home/data/brief-blocked-shape-scout/brief.md" \
+    "scout brief missing the mandatory-parts-on-one-line note"
+  pass "fm-brief.sh: every scaffold's blocked line carries the three mandatory parts on one line"
+}
+
+# Change: ship briefs point the worker at how already-accepted work in the
+# target repo is written. The instruction is static (no placeholder to fill)
+# and stays ship-only: a scout delivers a report, not code.
+test_ship_scaffold_points_at_accepted_conventions() {
+  local home ship scout
+  home="$TMP_ROOT/conventions-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" conv-ship firstmate --mode local-only >/dev/null 2>&1
+  ship="$home/data/conv-ship/brief.md"
+  assert_present "$ship" "ship brief was not scaffolded"
+  # shellcheck disable=SC2016  # single quotes are deliberate: the backticks must stay literal
+  assert_grep 'Before writing code, read a recent merged change that touched the same area (for example via `git log` on the files you are about to edit) and match the conventions you find there.' "$ship" \
+    "ship brief missing the self-contained read-accepted-work instruction"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" conv-scout firstmate --scout >/dev/null 2>&1
+  scout="$home/data/conv-scout/brief.md"
+  assert_no_grep "Before writing code, read a recent merged change" "$scout" \
+    "scout brief gained a code-convention instruction its report deliverable does not need"
+  pass "fm-brief.sh: ship briefs point at accepted conventions; scouts stay report-focused"
+}
+
 test_script_parses
 test_no_heredoc_in_command_substitution
 test_help_includes_entire_header
@@ -783,3 +912,7 @@ test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
+test_out_of_scope_section_renders_for_ship_and_scout
+test_secondmate_charter_keeps_single_refusal_contract
+test_blocked_line_carries_three_mandatory_parts_on_one_line
+test_ship_scaffold_points_at_accepted_conventions
