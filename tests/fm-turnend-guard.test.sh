@@ -1936,7 +1936,7 @@ test_hook_away_mode_blocks_without_any_supervisor() {
   dir=$(make_away_home_between_cycles "$TMP_ROOT/hook-afk-no-supervisor")
   out=$(run_hook "$dir" false); status=$?
   expect_code 2 "$status" "away mode with no daemon and no watcher must still block"
-  assert_contains "$out" "$AWAY_REQUIRED_REASON" "away-mode block must point at the daemon, not normal supervision"
+  assert_contains "$out" "$REQUIRED_REASON" "an away flag without a live identity-matched daemon is not covered and must reach the ordinary watcher repair line"
   pass "fm-turnend-guard: away mode with no daemon and no watcher still blocks"
 }
 
@@ -1947,7 +1947,7 @@ test_hook_away_mode_blocks_on_dead_daemon() {
   record_daemon_lock "$dir" "$dead" "dead daemon identity"
   out=$(run_hook "$dir" false); status=$?
   expect_code 2 "$status" "a daemon lock left by a dead daemon must not satisfy supervision"
-  assert_contains "$out" "$AWAY_REQUIRED_REASON" "away-mode block must point at the daemon, not normal supervision"
+  assert_contains "$out" "$REQUIRED_REASON" "an away flag without a live identity-matched daemon is not covered and must reach the ordinary watcher repair line"
   pass "fm-turnend-guard: away mode blocks on a dead away-mode daemon"
 }
 
@@ -1963,7 +1963,7 @@ test_hook_away_mode_blocks_on_pid_reused_daemon() {
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
   expect_code 2 "$status" "a live pid whose recorded identity does not match must not satisfy supervision"
-  assert_contains "$out" "$AWAY_REQUIRED_REASON" "away-mode block must point at the daemon, not normal supervision"
+  assert_contains "$out" "$REQUIRED_REASON" "an away flag without a live identity-matched daemon is not covered and must reach the ordinary watcher repair line"
   pass "fm-turnend-guard: away mode blocks on a pid-reused away-mode daemon lock"
 }
 

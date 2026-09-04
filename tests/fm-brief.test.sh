@@ -877,17 +877,20 @@ test_out_of_scope_section_renders_for_ship_and_scout() {
       "$kind brief missing the report-dont-widen standing guidance"
     [ "$(grep -c -F '{OUT_OF_SCOPE}' "$brief")" = 1 ] \
       || fail "$kind brief must carry exactly one {OUT_OF_SCOPE} fill site"
+    # Structural, not a fixed line offset: the Task section carries subsections
+    # (## Captain's intent, ## Firstmate spec), so assert that the very next
+    # top-level heading after # Task is # Out of scope.
     awk '
-      /^# Task$/ { task = NR }
-      /^# Out of scope$/ { ok = (task && NR == task + 3); exit }
+      /^# Task$/ { task = 1; next }
+      task && /^# / { ok = ($0 == "# Out of scope"); exit }
       END { exit ok ? 0 : 1 }
-    ' "$brief" || fail "$kind brief: # Out of scope must sit immediately after the Task section"
+    ' "$brief" || fail "$kind brief: # Out of scope must be the next top-level section after # Task"
     case "$kind" in
       ship)
-        assert_contains "$out" "(ship, mode=no-mistakes; replace {TASK}, {OUT_OF_SCOPE})" \
+        assert_contains "$out" "(ship, mode=no-mistakes; replace {TASK}, {FIRSTMATE_SPEC}, {OUT_OF_SCOPE})" \
           "ship scaffolded line must name every placeholder the caller still has to fill" ;;
       scout)
-        assert_contains "$out" "(scout; replace {TASK}, {OUT_OF_SCOPE})" \
+        assert_contains "$out" "(scout; replace {TASK}, {FIRSTMATE_SPEC}, {OUT_OF_SCOPE})" \
           "scout scaffolded line must name every placeholder the caller still has to fill" ;;
     esac
   done
