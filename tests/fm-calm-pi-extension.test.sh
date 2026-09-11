@@ -3266,7 +3266,12 @@ SH
 
   : >"$dir/attempts-hang"
   : >"$out_file"
-  if FM_FAKE_CHROME_ATTEMPTS="$dir/attempts-hang" FM_CHROME_RENDER_WAIT_TICKS=3 \
+  # The tick budget must stay generous enough that a slow-to-schedule Chrome
+  # start-up still gets to run and record its attempt before the per-attempt
+  # timeout kills it: 3 ticks (~0.3s) raced the first launch on macOS/Bash 3.2
+  # hosts and dropped its attempt line, which reads as a missing retry rather
+  # than the timeout this sub-case proves.
+  if FM_FAKE_CHROME_ATTEMPTS="$dir/attempts-hang" FM_CHROME_RENDER_WAIT_TICKS=30 \
     render_export_dom "$dir/chrome-hang" "$source_file" "$out_file" 9.9.9 >"$dir/report-hang"
   then
     fail "render_export_dom accepted a Chrome that never finished the DOM"
