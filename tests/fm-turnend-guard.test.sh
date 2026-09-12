@@ -2094,13 +2094,8 @@ test_hook_daemon_lock_is_ignored_without_away_mode() {
 # must still block a dead daemon or a beacon older than that wider grace.
 
 set_poll_grace_beacon_mtime() {
-  local beacon=$1 epoch=$2 stamp actual
-  if [ "$(uname)" = Darwin ]; then
-    stamp=$(date -r "$epoch" '+%Y%m%d%H%M.%S') || fail "could not format beacon timestamp"
-    touch -mt "$stamp" "$beacon" || fail "could not set beacon timestamp"
-  else
-    touch -m -d "@$epoch" "$beacon" || fail "could not set beacon timestamp"
-  fi
+  local beacon=$1 epoch=$2 actual
+  fm_touch_epoch "$epoch" "$beacon"
   actual=$(fm_sup_stat_mtime "$beacon") || fail "could not read back beacon timestamp"
   [ "$actual" = "$epoch" ] || fail "beacon timestamp did not take effect: expected $epoch, got $actual"
 }
