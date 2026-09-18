@@ -3,9 +3,12 @@
 #
 # ONE owner for the no-mistakes run-attribution primitives used by
 # fm-crew-state.sh (read-only current-state reporting) and fm-teardown.sh
-# (pre-teardown run abort, see its "Fix 1" header comment). Teardown uses only
-# strict branch-and-head identity; crew-state additionally permits the active
-# pipeline-owned attribution paths defined below. Getting this wrong in either
+# (pre-teardown run abort, see its "Fix 1" header comment). Both bind a run
+# by strict branch-and-head identity first, and both then recognize a provable
+# pipeline-owned continuation through fm_nm_runs_status_for_worktree below:
+# crew-state for an ACTIVE run, so a fix round never reads as an older failed
+# run, and teardown for a run PARKED at a gate, so cleanup concludes it
+# instead of orphaning it. Getting this wrong in either
 # direction is unsafe: a false negative hides a genuinely parked run, and a
 # false positive lets teardown act on a run it does not own.
 #
@@ -76,6 +79,22 @@ fm_nm_resolve_commit() {  # <worktree> <sha-ish>
 # recognition for that case, and fm_nm_run_is_pipeline_owned_active below
 # carries the custody exemption: a live run whose pipeline currently owns the
 # branch binds without head equality.
+#
+# This predicate binds one run at a time, and MORE THAN ONE recorded run can
+# bind to the same worktree at once: a run that died at the worktree's exact
+# commit still binds by the equal-commit rule while its live successor binds by
+# the ancestor rule (observed 2026-08: a crashed validation daemon left a failed
+# run at the worktree's own commit while the live run that replaced it validated
+# a descendant commit on the same branch).
+# When several runs bind, a LIVE run always outranks a terminal one, whichever
+# match rule each one used, because a terminal run can be the corpse of a
+# crashed attempt while the live one is what is actually validating this code.
+# Within one liveness class the selecting caller's existing precedence is
+# unchanged - for the runs ledger, fm_nm_runs_status_for_worktree's
+# newest-row-decides rule below.
+# fm_nm_run_status_class next classifies a recorded status word for that
+# comparison, and a word it cannot classify keeps the caller's own precedence
+# rather than being held back for a live row to displace.
 fm_nm_head_matches_worktree() {  # <worktree> <run_head>
   local wt=$1 run_head=$2 local_full run_full
   [ -n "$run_head" ] || return 1
@@ -84,6 +103,19 @@ fm_nm_head_matches_worktree() {  # <worktree> <run_head>
   [ -n "$run_full" ] || return 1
   [ "$run_full" = "$local_full" ] && return 0
   git -C "$wt" merge-base --is-ancestor "$local_full" "$run_full" 2>/dev/null
+}
+
+# Liveness class of a recorded run's status word, echoed as "terminal", "live",
+# or "unknown", for the live-over-terminal selection rule above.
+# The coarse `no-mistakes runs` ledger emits exactly these four status words; an
+# `axi status` run object reports its terminal result through its own outcome
+# field as well, which fm_nm_run_is_active below checks directly.
+fm_nm_run_status_class() {  # <status_word>
+  case "${1:-}" in
+    completed|failed|cancelled) printf 'terminal' ;;
+    running)                    printf 'live' ;;
+    *)                          printf 'unknown' ;;
+  esac
 }
 
 # branch_sync.state from captured `axi status` TOON $1: the scalar directly
@@ -129,8 +161,9 @@ fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
 # "<status> <branch> <short-sha> <date> [<pr-url>]"; the `axi` surface has no
 # runs-listing subcommand - verified against the installed CLI). Prints the
 # status word of the branch's CURRENT run row, or nothing when the ledger
-# cannot prove attribution. The branch's NEWEST row alone decides; older rows
-# are history and never answer for the present:
+# cannot prove attribution. When optional expected head $4 is supplied, its
+# abbreviated commit identity must match the newest row. The branch's NEWEST
+# row alone decides; older rows are history and never answer for the present:
 #   - newest row's head resolves and matches the worktree (fm_nm_head_matches_worktree):
 #     its status word
 #   - newest row's head resolves but does not match: nothing (a newer run that
@@ -146,38 +179,111 @@ fm_nm_run_is_pipeline_owned_active() {  # <toon-output>
 #     printed. Anything else (no anchor row, an anchor that is merely an
 #     ancestor, a terminal unresolvable row) prints nothing, so branch-name
 #     coincidence, arbitrary remote state, and other tasks' runs never match.
+# The one exception to newest-row-decides is the live-over-terminal rule stated
+# with fm_nm_head_matches_worktree above, and it only ever replaces a TERMINAL
+# answer with a LIVE one: when the newest row binds but is terminal, the older
+# rows are scanned for a live row that ALSO binds to this worktree, and that
+# row's status word is printed instead. A live row whose head resolves in this
+# copy binds by fm_nm_head_matches_worktree. A live row whose head does NOT
+# resolve (the routine shape: the pipeline's fix-round commits live only in the
+# gate repo) binds ONLY when the held terminal row sits at EXACTLY the worktree
+# HEAD - the same exact-equality anchor the pipeline-continuation rule above
+# requires, so branch-name coincidence and other tasks' runs still never
+# match. A terminal newest row is the corpse of a crashed attempt whenever a
+# live run for the same worktree is still on the ledger, so it is not the
+# present. Nothing else widens: a newest row that does not bind still ends the
+# scan, a newest row whose class is live or unclassifiable is still answered
+# as-is, the anchored pipeline-continuation path is untouched, and with no live
+# sibling the newest terminal word is still what is printed.
 # Read-only: git reads resolve objects in place; custody never changes.
-fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output>
-  local wt=$1 branch=$2 list=$3
-  local local_full row st rest br sha pending_st=''
+fm_nm_runs_status_for_worktree() {  # <worktree> <branch> <runs-list-output> [expected-head]
+  local wt=$1 branch=$2 list=$3 expected_head=${4:-}
+  local local_full row_full row st br sha day clock pr extra year_num month_num day_num max_day pending_st=''
+  # Set only by the newest binding row when its status classifies terminal, and
+  # printed when the scan ends without finding a live row for this worktree. It
+  # is the sole reason the scan continues past the newest row, and every exit
+  # below leaves the loop rather than returning, so a malformed older row can
+  # never swallow an answer the newest row had already decided.
+  local decided='' decided_exact=''
   local_full=$(git -C "$wt" rev-parse HEAD 2>/dev/null) || return 0
   [ -n "$list" ] || return 0
   while IFS= read -r row; do
     row=$(fm_nm_trim "$row")
     [ -n "$row" ] || continue
-    st=${row%% *}
-    rest=$(fm_nm_trim "${row#* }")
-    br=${rest%% *}
+    IFS=$' \t' read -r st br sha day clock pr extra <<< "$row"
+    [ -n "$st" ] && [ -n "$br" ] && [ -n "$sha" ] && [ -n "$day" ] && [ -n "$clock" ] || break
+    [ -z "$extra" ] || break
+    case "$st" in *[!a-z_-]*|'') break ;; esac
+    case "$br" in *[!A-Za-z0-9._/-]*|'') break ;; esac
+    case "$sha" in *[!A-Fa-f0-9]*|'') break ;; esac
+    case "$day" in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) break ;; esac
+    case "$clock" in [01][0-9]:[0-5][0-9]|2[0-3]:[0-5][0-9]) ;; *) break ;; esac
+    case "$pr" in ''|https://*) ;; *) break ;; esac
+    [ "${#sha}" -ge 7 ] && [ "${#sha}" -le 40 ] || break
+    year_num=$((10#${day%%-*}))
+    month_num=${day#*-}; month_num=${month_num%%-*}; month_num=$((10#$month_num))
+    day_num=$((10#${day##*-}))
+    [ "$year_num" -gt 0 ] && [ "$month_num" -ge 1 ] && [ "$month_num" -le 12 ] || break
+    case "$month_num" in
+      1|3|5|7|8|10|12) max_day=31 ;;
+      4|6|9|11) max_day=30 ;;
+      2)
+        if (( year_num % 400 == 0 || (year_num % 4 == 0 && year_num % 100 != 0) )); then
+          max_day=29
+        else
+          max_day=28
+        fi
+        ;;
+    esac
+    [ "$day_num" -ge 1 ] && [ "$day_num" -le "$max_day" ] || break
     [ "$br" = "$branch" ] || continue
-    rest=$(fm_nm_trim "${rest#* }")
-    sha=${rest%% *}
+    if [ -n "$decided" ]; then
+      # Live-over-terminal: the newest row bound to this worktree but is a
+      # terminal record, so the older rows are searched for a live run that
+      # binds to the same worktree by the same head rule. Only such a row
+      # displaces the held terminal word; anything else leaves it standing.
+      [ "$(fm_nm_run_status_class "$st")" = live ] || continue
+      if [ -n "$(fm_nm_resolve_commit "$wt" "$sha")" ]; then
+        fm_nm_head_matches_worktree "$wt" "$sha" || continue
+      else
+        [ -n "$decided_exact" ] || continue
+      fi
+      decided=$st
+      break
+    fi
     if [ -n "$pending_st" ]; then
       # This is the row immediately older than the active unresolvable row:
       # the only admissible anchor, and only exact head equality proves the
       # worktree still sits at the submitted head.
       if [ "$(fm_nm_resolve_commit "$wt" "$sha")" = "$local_full" ]; then
-        printf '%s' "$pending_st"
+        decided=$pending_st
       fi
-      return 0
+      break
     fi
-    if [ -n "$(fm_nm_resolve_commit "$wt" "$sha")" ]; then
+    if [ -n "$expected_head" ]; then
+      case "$expected_head" in *[!A-Fa-f0-9]*|'') break ;; esac
+      [ "${#expected_head}" -ge 7 ] && [ "${#expected_head}" -le 40 ] || break
+      case "$expected_head" in
+        "$sha"*) ;;
+        *) case "$sha" in "$expected_head"*) ;; *) break ;; esac ;;
+      esac
+    fi
+    row_full=$(fm_nm_resolve_commit "$wt" "$sha")
+    if [ -n "$row_full" ]; then
       if fm_nm_head_matches_worktree "$wt" "$sha"; then
-        printf '%s' "$st"
+        decided=$st
+        # A live or unclassifiable word is this worktree's current answer and
+        # ends the scan; only a terminal one keeps looking for a live sibling.
+        if [ "$(fm_nm_run_status_class "$st")" = terminal ]; then
+          [ "$row_full" != "$local_full" ] || decided_exact=1
+          continue
+        fi
       fi
-      return 0
+      break
     fi
-    [ "$st" = running ] || return 0
+    [ "$st" = running ] || break
     pending_st=$st
   done <<< "$list"
+  printf '%s' "$decided"
   return 0
 }
