@@ -1605,10 +1605,6 @@ families_for_changed_path() {
     docs/configuration.md|docs/supervision-protocols/*)
       printf '%s\n' pure-contract-unit
       ;;
-    tests/lib.sh|tests/*-helpers.sh|tests/*-fixture.sh|tests/fixtures.sh)
-      families_for_test_reference "$(basename "$path")" \
-        || printf '%s\n' "__unmapped__:$path"
-      ;;
     tests/git-config-helpers.sh)
       # The reference scan is not transitive, so match the two helpers that
       # source this one as well: most suites inherit it only through them.
