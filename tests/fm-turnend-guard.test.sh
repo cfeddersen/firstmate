@@ -493,6 +493,36 @@ test_hook_afk_stale_flag_reaches_ordinary_repair() {
   pass "fm-turnend-guard: a stale away flag with a dead daemon does not stand down and reaches watcher repair"
 }
 
+test_hook_afk_quiet_flag_with_live_daemon_gets_quiet_guidance() {
+  local dir pid out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-afk-quiet-live-daemon")
+  : > "$dir/state/task1.meta"
+  printf 'quiet\n' > "$dir/state/.afk"
+  sleep 60 &
+  pid=$!
+  record_live_daemon_lock "$dir" "$pid"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 2 "$status" "hook must still block a blind turn under genuinely covered quiet mode"
+  assert_contains "$out" "Quiet mode owns watcher supervision" "covered quiet mode lost its quiet-mode repair guidance"
+  assert_not_contains "$out" "Away mode owns watcher supervision" "covered quiet mode must not render away-mode guidance"
+  pass "fm-turnend-guard: quiet flag with a live daemon keeps the quiet-mode repair guidance"
+}
+
+test_hook_afk_stale_quiet_flag_reaches_ordinary_repair() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-afk-stale-quiet-flag")
+  : > "$dir/state/task1.meta"
+  printf 'quiet\n' > "$dir/state/.afk"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must still block a blind turn when the stale flag claims quiet mode"
+  assert_contains "$out" "$REQUIRED_REASON" "a stale quiet flag with a dead daemon must reach the ordinary watcher repair line"
+  assert_not_contains "$out" "Quiet mode owns watcher supervision" "the stale quiet flag must not render quiet-mode ownership guidance"
+  assert_not_contains "$out" "Away mode owns watcher supervision" "the stale quiet flag must not render away-mode ownership guidance"
+  pass "fm-turnend-guard: a stale quiet flag with a dead daemon does not stand down and reaches watcher repair"
+}
+
 test_hook_afk_flag_absent_unchanged() {
   local dir out status
   dir=$(make_primary_dir "$TMP_ROOT/hook-afk-absent")
@@ -2319,7 +2349,9 @@ test_hook_non_claude_health_ignores_claude_budget_contention
 test_hook_blocks_with_live_lock_and_stale_beacon
 test_hook_blocks_when_unhealthy_in_primary
 test_hook_afk_flag_with_live_daemon_keeps_away_guidance
+test_hook_afk_quiet_flag_with_live_daemon_gets_quiet_guidance
 test_hook_afk_stale_flag_reaches_ordinary_repair
+test_hook_afk_stale_quiet_flag_reaches_ordinary_repair
 test_hook_afk_flag_absent_unchanged
 test_hook_afk_liveness_indeterminate_treated_not_covered
 test_hook_blocks_from_fm_home_state
