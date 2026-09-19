@@ -764,11 +764,12 @@ AFK_PRESENT=0
 AFK_FLAG_PRESENT=0
 [ -e "$STATE/.afk" ] && AFK_FLAG_PRESENT=1
 AFK_MODE=$(fm_afk_mode "$STATE")
-# Away mode requires the live-daemon pairing. Quiet mode is the captain-present
-# posture: its explicit quiet flag remains the mode declaration even when the
-# daemon has not yet established coverage, so the digest can direct recovery in
-# quiet terms instead of misreporting it as stale away mode.
-if fm_afk_supervision_covered || { [ "$AFK_MODE" = quiet ] && [ "$AFK_FLAG_PRESENT" -eq 1 ]; }; then
+# Both postures require the live-daemon pairing: a stale flag left by a dead
+# daemon must not claim away-mode or quiet-mode coverage at session start. The
+# not-covered digest branches below keep the mode wording (quiet terms for a
+# quiet flag) so recovery instructions stay accurate while never claiming
+# ownership.
+if fm_afk_supervision_covered; then
   AFK_PRESENT=1
 fi
 X_MODE_PRESENT=0
@@ -908,7 +909,11 @@ if [ -f "$STATE/.afk-contract" ]; then
       printf '; the away daemon owns the watcher.\n'
     fi
   elif [ "$AFK_FLAG_PRESENT" -eq 1 ]; then
-    printf '; the away-mode daemon is not running - away-mode supervision is NOT covered; repair supervision instead of standing down.\n'
+    if [ "$AFK_MODE" = quiet ]; then
+      printf '; the quiet-mode daemon is not running - quiet-mode supervision is NOT covered; repair supervision instead of standing down.\n'
+    else
+      printf '; the away-mode daemon is not running - away-mode supervision is NOT covered; repair supervision instead of standing down.\n'
+    fi
   else
     printf '; no daemon runs, the ordinary supervision session continues.\n'
   fi
@@ -919,7 +924,11 @@ elif [ "$AFK_PRESENT" -eq 1 ]; then
     printf 'present - away-mode supervision is active; the daemon owns the watcher (legacy flag with no posture record).\n'
   fi
 elif [ "$AFK_FLAG_PRESENT" -eq 1 ]; then
-  printf 'present but the away-mode daemon is not running - away-mode supervision is NOT covered; repair supervision instead of standing down.\n'
+  if [ "$AFK_MODE" = quiet ]; then
+    printf 'present but the quiet-mode daemon is not running - quiet-mode supervision is NOT covered; repair supervision instead of standing down.\n'
+  else
+    printf 'present but the away-mode daemon is not running - away-mode supervision is NOT covered; repair supervision instead of standing down.\n'
+  fi
 else
   printf 'absent\n'
 fi

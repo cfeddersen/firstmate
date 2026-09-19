@@ -2495,9 +2495,12 @@ EOF
   pass "a stale away flag cannot claim away-mode supervision at session start"
 }
 
-test_next_step_quiet_mode_delegates_to_daemon() {
+# The same stale-flag lie applies to quiet mode: a quiet-content flag with no
+# live daemon must not claim quiet-mode coverage at session start, and the
+# recovery wording must stay in quiet terms instead of misreporting away mode.
+test_afk_stale_quiet_flag_does_not_claim_coverage() {
   local rec root home fakebin out
-  rec=$(new_world next-step-quiet)
+  rec=$(new_world afk-stale-quiet-flag)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
@@ -2506,6 +2509,36 @@ EOF
   printf 'quiet\n%s\n' "$(date '+%s')" > "$home/state/.afk"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "present but the quiet-mode daemon is not running" "AFK digest did not expose the stale quiet flag"
+  assert_contains "$out" "quiet-mode supervision is NOT covered" "AFK digest did not report the lost quiet coverage"
+  assert_contains "$out" "- Away/quiet mode: inactive" "supervision block still claimed quiet coverage from the stale flag"
+  assert_not_contains "$out" "quiet-mode supervision is active" "digest still claimed active quiet ownership from the stale flag"
+  assert_not_contains "$out" "Quiet mode is active" "next step still delegated ownership to a dead daemon"
+  assert_not_contains "$out" "away-mode supervision is NOT covered" "stale quiet flag was misreported as away mode"
+
+  pass "a stale quiet flag cannot claim quiet-mode supervision at session start"
+}
+
+test_next_step_quiet_mode_delegates_to_daemon() {
+  local rec root home fakebin out daemon_pid
+  rec=$(new_world next-step-quiet)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_with_daemon_identity "$fakebin"
+  printf 'quiet\n%s\n' "$(date '+%s')" > "$home/state/.afk"
+  # Quiet coverage needs the same live-daemon pairing as away mode under the
+  # fail-closed stale-flag rule, so the covered case records a live daemon lock.
+  sleep 60 &
+  daemon_pid=$!
+  record_live_daemon_lock "$home" "$daemon_pid"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
 
   assert_contains "$out" "quiet-mode supervision is active" "AFK digest did not report quiet mode for a quiet-content flag"
   assert_contains "$out" "only an explicit /quiet off exits it" "AFK digest lost the explicit-only exit rule"
@@ -2777,6 +2810,7 @@ test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_afk_stale_flag_does_not_claim_coverage
+test_afk_stale_quiet_flag_does_not_claim_coverage
 test_next_step_quiet_mode_delegates_to_daemon
 test_next_step_afk_legacy_empty_flag_defaults_away
 test_supervision_block_exactly_one_and_pi_diagnostic
