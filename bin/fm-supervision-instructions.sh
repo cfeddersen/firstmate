@@ -231,6 +231,9 @@ if [ "$AFK" -eq 1 ]; then
     printf '%s\n' '- Away mode: active; load /afk and keep normal harness supervision paused while the daemon owns the watcher.'
   fi
 else
+  # Preserve the fork's explicit away-mode diagnostic alongside upstream's
+  # combined away/quiet wording.
+  printf '%s\n' '- Away mode: inactive.'
   printf '%s\n' '- Away/quiet mode: inactive.'
 fi
 if [ "$X_MODE" -eq 1 ]; then

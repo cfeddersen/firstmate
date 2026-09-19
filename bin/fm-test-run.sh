@@ -1349,6 +1349,10 @@ families_for_changed_path() {
       printf '%s\n' real-herdr-gated
       printf '%s\n' backend-dispatch
       ;;
+    tests/fm-turnend-foreign-owner-repro.py)
+      families_for_test_reference fm-turnend-foreign-owner-repro.py \
+        || printf '%s\n' "__unmapped__:$path"
+      ;;
     tests/*.test.sh)
       # A single test file change selects only that script via basename family
       # resolution in the caller; emit a marker family of __script__
@@ -1601,7 +1605,7 @@ families_for_changed_path() {
     docs/fm-test-isolation-proof.json)
       printf '%s\n' pure-contract-unit
       ;;
-    .github/*|.gitattributes|.tasks.toml|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|\
+    .github/*|.gitattributes|.tasks.toml|AGENTS.md|CLAUDE.md|CONTRIBUTING.md|GROK_BOT.md|\
     docs/configuration.md|docs/supervision-protocols/*)
       printf '%s\n' pure-contract-unit
       ;;
@@ -1609,6 +1613,16 @@ families_for_changed_path() {
       # The reference scan is not transitive, so match the two helpers that
       # source this one as well: most suites inherit it only through them.
       families_for_test_reference git-config-helpers.sh lib.sh herdr-test-safety.sh \
+        || printf '%s\n' "__unmapped__:$path"
+      ;;
+    tests/assets/board-render-harness.mjs)
+      families_for_test_reference board-render-harness.mjs \
+        || printf '%s\n' "__unmapped__:$path"
+      ;;
+    tests/captures/*)
+      capture_ref=${path#tests/captures/}
+      capture_ref=${capture_ref%%/*}
+      families_for_test_reference "$capture_ref" \
         || printf '%s\n' "__unmapped__:$path"
       ;;
     tests/fixtures/*/*)

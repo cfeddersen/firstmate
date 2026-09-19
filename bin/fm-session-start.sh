@@ -763,8 +763,14 @@ AFK_PRESENT=0
 # cannot make those three disagree with each other.
 AFK_FLAG_PRESENT=0
 [ -e "$STATE/.afk" ] && AFK_FLAG_PRESENT=1
-fm_afk_supervision_covered && AFK_PRESENT=1
 AFK_MODE=$(fm_afk_mode "$STATE")
+# Away mode requires the live-daemon pairing. Quiet mode is the captain-present
+# posture: its explicit quiet flag remains the mode declaration even when the
+# daemon has not yet established coverage, so the digest can direct recovery in
+# quiet terms instead of misreporting it as stale away mode.
+if fm_afk_supervision_covered || { [ "$AFK_MODE" = quiet ] && [ "$AFK_FLAG_PRESENT" -eq 1 ]; }; then
+  AFK_PRESENT=1
+fi
 X_MODE_PRESENT=0
 [ -f "$CONFIG/x-mode.env" ] && X_MODE_PRESENT=1
 

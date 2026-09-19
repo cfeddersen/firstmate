@@ -2519,16 +2519,22 @@ EOF
 }
 
 test_next_step_afk_legacy_empty_flag_defaults_away() {
-  local rec root home fakebin out
+  local rec root home fakebin out daemon_pid
   rec=$(new_world next-step-afk-legacy)
   IFS='|' read -r root home fakebin <<EOF
 $rec
 EOF
   make_fake_toolchain "$fakebin"
-  make_fake_ps_claude "$fakebin"
+  make_fake_ps_with_daemon_identity "$fakebin"
   : > "$home/state/.afk"
+  sleep 60 &
+  daemon_pid=$!
+  record_live_daemon_lock "$home" "$daemon_pid"
 
   out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
 
   assert_contains "$out" "away-mode supervision is active" "a legacy empty .afk flag was not read as away mode"
   assert_contains "$out" "Away mode is active" "a legacy empty .afk flag did not drive away-mode next-step guidance"
