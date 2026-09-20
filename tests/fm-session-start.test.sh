@@ -252,10 +252,15 @@ record_live_daemon_lock() {  # <home> <pid>
 
 make_fake_ps_harness() {
   local fakebin=$1 harness=$2
-  cat > "$fakebin/ps" <<'SH'
+  cat > "$fakebin/ps" <<SH
 #!/usr/bin/env bash
 set -u
-harness=${FM_FAKE_HARNESS:-claude}
+# The ancestry this stub reports defaults to the harness the fixture was built
+# for, so a case that builds a pi (or codex) fixture gets pi (or codex) ancestry
+# without having to repeat it per run; FM_FAKE_HARNESS still overrides it.
+harness=\${FM_FAKE_HARNESS:-$harness}
+SH
+  cat >> "$fakebin/ps" <<'SH'
 pid=
 previous=
 for argument in "$@"; do
@@ -1790,7 +1795,7 @@ EOF
   assert_not_contains "$out" "DONE-ROW-LINE" "tasks-axi compact digest listed a done row at startup"
   assert_contains "$out" "--- compact-startup ---" "in-flight meta identity disappeared from startup recovery digest"
   assert_contains "$out" "worktree=$home/projects/firstmate" "in-flight recovery worktree identity disappeared from startup digest"
-  assert_contains "$out" "Full task bodies remain available on demand: tasks-axi show <id> --full" \
+  assert_contains "$out" "Full task bodies remain available on demand: bin/fm-tasks-axi.sh show <id> --full" \
     "compact digest omitted the full-body lookup pointer"
   assert_contains "$out" "ready_public_followups: 0 delivery-ready obligations" \
     "the composed listing dropped a real signal from the dispatchable set"
@@ -1834,7 +1839,7 @@ EOF
   assert_not_contains "$out" "ready-4,queued" "the queued bound did not actually bound the ready listing"
   assert_contains "$out" "(shown 3 of 7 ready queued item(s))" \
     "the bounded queued listing did not report what it showed"
-  assert_contains "$out" "(4 more queued - tasks-axi ready --file $home/data/backlog.md)" \
+  assert_contains "$out" "(4 more queued - bin/fm-tasks-axi.sh ready)" \
     "the bounded queued listing did not disclose an exact remainder and how to see it"
 
   # The bound is for dispatchable work only: held and blocked rows stay whole.
@@ -2490,6 +2495,87 @@ EOF
   pass "a stale away flag cannot claim away-mode supervision at session start"
 }
 
+# The same stale-flag lie applies to quiet mode: a quiet-content flag with no
+# live daemon must not claim quiet-mode coverage at session start, and the
+# recovery wording must stay in quiet terms instead of misreporting away mode.
+test_afk_stale_quiet_flag_does_not_claim_coverage() {
+  local rec root home fakebin out
+  rec=$(new_world afk-stale-quiet-flag)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  printf 'quiet\n%s\n' "$(date '+%s')" > "$home/state/.afk"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "present but the quiet-mode daemon is not running" "AFK digest did not expose the stale quiet flag"
+  assert_contains "$out" "quiet-mode supervision is NOT covered" "AFK digest did not report the lost quiet coverage"
+  assert_contains "$out" "- Away/quiet mode: inactive" "supervision block still claimed quiet coverage from the stale flag"
+  assert_not_contains "$out" "quiet-mode supervision is active" "digest still claimed active quiet ownership from the stale flag"
+  assert_not_contains "$out" "Quiet mode is active" "next step still delegated ownership to a dead daemon"
+  assert_not_contains "$out" "away-mode supervision is NOT covered" "stale quiet flag was misreported as away mode"
+
+  pass "a stale quiet flag cannot claim quiet-mode supervision at session start"
+}
+
+test_next_step_quiet_mode_delegates_to_daemon() {
+  local rec root home fakebin out daemon_pid
+  rec=$(new_world next-step-quiet)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_with_daemon_identity "$fakebin"
+  printf 'quiet\n%s\n' "$(date '+%s')" > "$home/state/.afk"
+  # Quiet coverage needs the same live-daemon pairing as away mode under the
+  # fail-closed stale-flag rule, so the covered case records a live daemon lock.
+  sleep 60 &
+  daemon_pid=$!
+  record_live_daemon_lock "$home" "$daemon_pid"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+
+  assert_contains "$out" "quiet-mode supervision is active" "AFK digest did not report quiet mode for a quiet-content flag"
+  assert_contains "$out" "only an explicit /quiet off exits it" "AFK digest lost the explicit-only exit rule"
+  assert_contains "$out" "Quiet mode is active" "next step did not switch to quiet-mode guidance"
+  assert_contains "$out" "load /quiet" "next step did not name the /quiet skill"
+  assert_contains "$out" "- Quiet mode: active" "supervision block did not include active quiet state"
+  assert_not_contains "$out" "Away mode is active" "quiet-mode flag was misreported as away mode"
+  assert_not_contains "$out" "  bin/fm-watch-arm.sh" "quiet next step still told the agent to arm the watcher directly"
+
+  pass "next step delegates watcher ownership to the daemon in quiet mode, distinctly from away mode"
+}
+
+test_next_step_afk_legacy_empty_flag_defaults_away() {
+  local rec root home fakebin out daemon_pid
+  rec=$(new_world next-step-afk-legacy)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_with_daemon_identity "$fakebin"
+  : > "$home/state/.afk"
+  sleep 60 &
+  daemon_pid=$!
+  record_live_daemon_lock "$home" "$daemon_pid"
+
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  kill "$daemon_pid" 2>/dev/null || true
+  wait "$daemon_pid" 2>/dev/null || true
+
+  assert_contains "$out" "away-mode supervision is active" "a legacy empty .afk flag was not read as away mode"
+  assert_contains "$out" "Away mode is active" "a legacy empty .afk flag did not drive away-mode next-step guidance"
+  assert_not_contains "$out" "Quiet mode" "a legacy empty .afk flag leaked quiet-mode text"
+
+  pass "a legacy empty .afk flag (written before mode existed) still reads as away mode"
+}
+
 test_supervision_block_exactly_one_and_pi_diagnostic() {
   local rec root home fakebin out block_count wake_line sup_line context_line
   rec=$(new_world pi-supervision-block)
@@ -2724,6 +2810,9 @@ test_fleet_digest_empty_fleet
 test_next_step_sources_x_mode_cadence
 test_next_step_afk_delegates_to_daemon
 test_afk_stale_flag_does_not_claim_coverage
+test_afk_stale_quiet_flag_does_not_claim_coverage
+test_next_step_quiet_mode_delegates_to_daemon
+test_next_step_afk_legacy_empty_flag_defaults_away
 test_supervision_block_exactly_one_and_pi_diagnostic
 test_pi_signed_primary_uses_pi_extensions_without_identity_normalization
 test_pi_diagnostic_rejects_stale_loaded_marker
